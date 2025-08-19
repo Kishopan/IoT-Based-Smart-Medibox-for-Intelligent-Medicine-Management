@@ -1,49 +1,40 @@
-#include <iostream>
 #include <Arduino.h>
+#include <DHTesp.h>
+#include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
-#include <time.h>
-#include <DHTesp.h>
-#include <esp32servo.h>
+#include <sys/time.h>
+#include <iostream>
+#include <ESP32Servo.h>
 #include <PubSubClient.h>
 
-#define NTP_SERVER "pool.ntp.org"
-
-#define UTC_OFFSET_DST 0
-
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
-#define SCREEN_ADDERSS 0x3c
-
-#define BUZZER 18
-#define LED_1 15
-#define LED_2 2
-#define CANCEL 26
-#define UP 35
-#define DOWN 32
-#define OK 33
-#define DHT 12
-#define servoPin 25
-#define ldr 34
-
-Adafruit_SSD1306 display(SCREEN_WIDTH,SCREEN_HEIGHT, &Wire, OLED_RESET);
-DHTesp dhtSensor;
+#define screen_width 128
+#define screen_height 64
+#define OLED_reset -1
+#define screen_address 0x3C
 Servo servoMotor;
 
-int UTC_OFFSET[]={5,30};
+const char* ssid = "Wokwi-GUEST";
+const char* password = "";
+int wifi_channel = 6;
 
-int n_notes=8;
-int c=262;
-int d=294;
-int e=330;
-int f=349;
-int g=392;
-int a=440;
-int b=494;
-int c_h =523;
-int notes[]={c,d,e,f,g,a,b,c_h};
+const tm timeInfo = { 12, 0, 0 };
+const char* NTP_SERVER = "pool.ntp.org";
+String UTC_OFFSET = "IST-5:30";
+String utc_offsets[] = {"UTC-12:00","UTC-11:00","UTC-10:00","UTC-09:30","UTC-09:00","UTC-08:00","UTC-07:00", "UTC-06:00","UTC-05:30", "UTC-04:30", "UTC-04:00", "UTC-03:30", "UTC-03:00","UTC-02:00","UTC-01:00", "UTC 00:00","UTC+01:00","UTC+02:00", "UTC+03:00", "UTC+03:30", "UTC+04:00", "UTC+04:30","UTC+05:00","UTC+05:30", "UTC+05:45","UTC+06:00","UTC+06:30","UTC+07:00","UTC+08:00","UTC+08:45", "UTC+09:00","UTC+09:30","UTC+10:00","UTC+10:30","UTC+11:00","UTC+12:00","UTC+12:45","UTC+13:00","UTC+14:00"};
+int num_utc_offsets = sizeof(utc_offsets)/sizeof(utc_offsets[0]);
+
+int seconds;
+int minutes;
+int hours;
+
+bool alarm1_enabled = false;
+bool alarm2_enabled = false;
+int num_alarms = 2;
+int alarm_hours[] = {0,0};
+int alarm_minutes[] = {0,0};
+bool alarm_triggered[] = {false,false};
 float ServoAngle=0.0;
 float SamplingInterval=5.0;
 float SendingInterval=120.0;
@@ -53,545 +44,519 @@ unsigned long sec_sample=0;
 unsigned long sec_send=0;
 int n=0;
 
-int days=0;
-int hours =0;
-int minutes =0;
-int seconds =0;
-bool alarm_enabled = false;
-int n_alarms =2;
-int alarm_hours[] = {9,0};
-int alarm_minutes[] = {39,10};
-bool alarm_triggered[] = {false,false};
-bool alarm_active[] = {false,false};
+bool is_countdown_active[2] = {false, false};
+int countdown_hours[2] = {0, 0};
+int countdown_minutes[2] = {0, 0};
+int countdown_seconds[2] = {0, 0};
 
-int current_mode =0;
-int max_modes = 4; 
-String options[]={"1 - Set Time", "2 - Set Alarm", "3 - View Active Alarm", "4-Remove Alarm"};
+#define TEMPURATURE_HIGH 32
+#define TEMPURATURE_LOW 24
+#define HUMIDITY_HIGH 80
+#define HUMIDITY_LOW 65
 
+int notes[] = {262, 294, 330, 349, 392, 440, 494, 523};
+int n_notes = sizeof(notes) / sizeof(notes[0]);
+
+#define DHT_PIN 14
+#define LED_RED_PIN 2
+#define BUZZER 0
+#define PB_BACK 26
+#define PB_OK 35
+#define PB_UP 32
+#define PB_DOWN 33
+#define PB_SNOOZE 25
+#define servoPin 16
+#define ldr 34
+
+Adafruit_SSD1306 display(screen_width, screen_height, &Wire, OLED_reset);
+DHTesp dhtSensor;
+
+int current_mode = 0;
+String modes[] = {"1 - Set Time","2 - Set Alarm 1","3 - Set Alarm 2","4 - Disable Alarms"};
+int max_mode = 4;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
-void print_line(String text, int text_size, int row, int column){
+void print_line(String text, String Clear_Screen="n", int text_size=1, int column=0, int row=0) {
+  if (Clear_Screen == "y") {
+    display.clearDisplay();
+  }
   display.setTextSize(text_size);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(column,row);
+  display.setCursor(column, row);
   display.println(text);
-
   display.display();
 }
 
-void update_time(void){
-  struct tm timeinfor;
-  getLocalTime(&timeinfor);
-
-  char day_str[8];
-  char hour_str[8];
-  char min_str[8];
-  char sec_str[8];
-  strftime(day_str,8, "%d",&timeinfor);
-  strftime(sec_str,8, "%S",&timeinfor);
-  strftime(hour_str,8, "%H",&timeinfor);
-  strftime(min_str,8, "%M",&timeinfor);
-  hours = atoi(hour_str);
-  minutes = atoi(min_str);
-  days = atoi(day_str);  
-  seconds = atoi(sec_str);
+void print_lines(String lines[], int num_lines, int text_size=1, int columns[] = nullptr, int rows[] = nullptr, bool clear_screen=true) {
+  if (clear_screen) {
+    display.clearDisplay();
+  }
+  display.setTextColor(SSD1306_WHITE);
+  for (int i = 0; i < num_lines; i++) {
+    display.setCursor(columns[i], rows[i]);
+    display.setTextSize(text_size);
+    display.println(lines[i]);
+  }
+  display.display();
 }
 
-void print_time_now(void){
-  print_line(String(days),2,0,0);
-  print_line(":",2,0,30);
-  print_line(String(hours),2,0,30);
-  print_line(":",2,0,30);
-  print_line(String(minutes),2,0,60);
-  print_line(":",2,0,30);
-  print_line(String(seconds),2,0,90);
-}
-
-void ring_alarm(){
-  display.clearDisplay();
-  print_line("Medicine Time",2,0,0);
-  
-  digitalWrite(LED_1, HIGH);
-
-  while (digitalRead(CANCEL)==HIGH){
-    for (int i=0; i< n_notes; i++){
-      if (digitalRead(CANCEL)==LOW){
-        display.clearDisplay();
-        print_line("Alarm stopped",1,32,0);
+void ring_alarm() {
+  print_line("MEDICINE", "y", 2, 16, 24);
+  print_line("TIME", "n", 2, 40, 40);
+  digitalWrite(LED_RED_PIN, HIGH);
+  delay(5000);
+  bool break_happened = false;
+  while (break_happened == false && digitalRead(PB_BACK) == HIGH) {
+    for(int i = 0; i < n_notes; i++) {
+      if (digitalRead(PB_BACK) == LOW) {
+        break_happened = true;
         delay(200);
-        digitalWrite(LED_1, LOW);
         break;
-      }
-      else if (digitalRead(OK)==LOW){
-        display.clearDisplay();
-        print_line("Alarm snoozed for 5 mins",1,32,0);
-        delay(5*60*1000);
       }
       tone(BUZZER, notes[i]);
-      delay(500);
+      delay(560);
       noTone(BUZZER);
-      delay(200);
+      delay(2);
     }
   }
-  int UTC_Offset = (UTC_OFFSET[0]*60*60) + (UTC_OFFSET[1]*60);
-  configTime(UTC_Offset, UTC_OFFSET_DST, NTP_SERVER);
+  digitalWrite(LED_RED_PIN, LOW);
+  noTone(BUZZER);
+  display.clearDisplay();
 }
 
-void update_time_with_check_alarm () {
-  display.clearDisplay();
+void update_countdown(int alarm_index) {
+  if (is_countdown_active[alarm_index]) {
+    if (countdown_seconds[alarm_index] == 0) {
+      if (countdown_minutes[alarm_index] == 0) {
+        if (countdown_hours[alarm_index] == 0) {
+          is_countdown_active[alarm_index] = false;
+          ring_alarm();
+        } else {
+          countdown_hours[alarm_index]--;
+          countdown_minutes[alarm_index] = 59;
+          countdown_seconds[alarm_index] = 59;
+        }
+      } else {
+        countdown_minutes[alarm_index]--;
+        countdown_seconds[alarm_index] = 59;
+      }
+    } else {
+      countdown_seconds[alarm_index]--;
+    }
+  }
+}
+
+void update_time() {
+  struct tm timeInfo;
+  if (!getLocalTime(&timeInfo)) {
+    print_line("Failed to obtain time", "y");
+    return;
+  }
+  seconds = timeInfo.tm_sec;
+  minutes = timeInfo.tm_min;
+  hours = timeInfo.tm_hour;
+}
+
+void print_time_now() {
   update_time();
-  print_time_now();
-  bool alarm_enabled = false;
+}
 
-  if (alarm_active[0]==true){
-    alarm_enabled = true;
+void show_warning(float value, float threshold_low, float threshold_high, String message, String &warning_message) {
+  if (value < threshold_low) {
+    warning_message += message + "LOW";
   }
-  else if (alarm_active[1]==true){
-    alarm_enabled = true;
-  }
-  if (alarm_enabled ==  true){
-    delay(500);
-  }
-  if (alarm_enabled ==  true){
-    for (int i=0; i<n_alarms; i++){
-      if (alarm_triggered[i] ==false & alarm_active[i] ==true & hours == alarm_hours[i] & minutes==alarm_minutes[i]){
-        ring_alarm();
-        alarm_triggered[i] = true;
-        alarm_active[i] = false;
-      }
-    }
+  if (value > threshold_high) {
+    warning_message += message + "HIGH";
   }
 }
 
-const char* wait_for_button_press(){
-  while (true){
-    if (digitalRead(UP) == 0){
-      delay(200);
-      delay(200);
-      return "UP";
-    }
-    else if (digitalRead(DOWN) == 0){
-      delay(200);
-      delay(200);
-      return "DOWN";
-    }
-    else if (digitalRead(CANCEL) == 0){
-      delay(200);
-      delay(200);
-      return "CANCEL";
-    }
-    else if (digitalRead(OK) == 0){
-      delay(200);
-      delay(200);
-      return "OK";
-    }
-    update_time();
-  }
-}
-
-void set_time(){
-  while (true){
-    display.clearDisplay();
-    print_line("Enter hour from UTC:" + String(UTC_OFFSET[0]),0,0,2);
-
-    String pressed = wait_for_button_press();
-    if (pressed == "UP"){
-      delay(200);
-      UTC_OFFSET[0] +=1;
-      UTC_OFFSET[0]= UTC_OFFSET[0] % 24;
-    }
-    else if (pressed == "DOWN"){
-        delay(200);
-        UTC_OFFSET[0] -= 1;
-        if (UTC_OFFSET[0]<0){
-          UTC_OFFSET[0]=23;
-        }
-    }
-    else if (pressed == "OK"){
-        delay(200);
-        break;
-    }
-    else if (pressed == "CANCEL"){
-        delay(200);
-        break;
-    }
-  }
-  while (true){
-    display.clearDisplay();
-    print_line("Enter minutes from UTC:" + String(UTC_OFFSET[1]), 0, 0,2);
-
-    String pressed = wait_for_button_press();
-    if (pressed == "UP"){
-      delay(200);
-      UTC_OFFSET[1] +=1;
-      UTC_OFFSET[1] = UTC_OFFSET[1] % 60;
-    }
-    else if (pressed == "DOWN"){
-      delay(200);
-      UTC_OFFSET[1] -= 1;
-      if (UTC_OFFSET[1]<0){
-        UTC_OFFSET[1]=59;
-      }
-    }
-    else if (pressed == "OK"){
-      delay(200);
-      UTC_OFFSET[1] = (UTC_OFFSET[1]);
-      break;
-    }
-
-    else if (pressed == "CANCEL"){
-      delay(200);
-      break;
-    }
-  }
-  int UTC_Offset = (UTC_OFFSET[0]*60*60) + (UTC_OFFSET[1]*60);
-  display.clearDisplay();
-  print_line("Enter the direction from UTC", 0, 0, 2);
-  print_line("+ up", 0, 16, 2);
-  print_line("- Down", 0, 24, 2);
-  String pressed = wait_for_button_press();
-  if (pressed == "DOWN") {
-    UTC_Offset *= -1;
-  }
-  
-  configTime(UTC_Offset, UTC_OFFSET_DST, NTP_SERVER);
-  delay(2000);
-  display.clearDisplay();
-  print_line("Time is set", 0, 0, 2);
-  delay(1000);
-}
-
-void active_alarm(){
-  display.clearDisplay();
-  int x=0;
-  for (int i=0; i<n_alarms;i++){
-    if (alarm_active[i]==true){
-      
-      print_line("Alarm " + String(i+1) , 1, x, 2);
-      x +=9;
-      print_line( String(i+1) +":"+ String(alarm_hours[i]) +":"+ String(alarm_minutes[i]), 1, x, 0);
-      x +=9;
-    }
-  }
-  delay(1000);
-}
-
-void set_alarm(int alarm){
-  alarm -=1;
-  alarm_active[alarm] = true;
-  alarm_triggered[alarm] = false;
-  alarm_enabled=true;
-  int temp_hour = alarm_hours[alarm];
-  while (true){
-    display.clearDisplay();
-    print_line("Enter hour: " + String(temp_hour), 1, 0, 2);
-
-    String pressed = wait_for_button_press();
-    if (pressed == "UP") {
-      delay(200);
-      temp_hour +=1;
-      temp_hour = temp_hour % 24;
-    }
-    else if (pressed == "DOWN"){
-      delay(200);
-      temp_hour -=1;
-      if (temp_hour < 0) {
-        temp_hour =23;
-      }
-    }
-    else if (pressed == "OK"){
-      delay(200);
-      alarm_hours[alarm] = temp_hour;
-      break;
-    }
-    else if (pressed == "CANCEL"){
-      delay(200);
-      break;
-    }
-  }
-  int temp_minute = alarm_minutes[alarm];
-  while (true){
-    display.clearDisplay();
-    print_line("Enter minute: " + String(temp_minute),1,0,2);
-    String pressed = wait_for_button_press();
-    if (pressed == "UP"){
-      delay(200);
-      temp_minute +=1;
-      temp_minute = temp_minute % 60;
-    }
-    else if (pressed == "DOWN"){
-      delay(200);
-      temp_minute -= 1;
-      if (temp_minute<0){
-           temp_minute=59;
-      }
-    }
-    else if (pressed == "OK"){
-      delay(200);
-      alarm_minutes[alarm] = temp_minute;
-      break;
-    }
-    else if (pressed == "CANCEL"){
-      delay(200);
-      break;
-    }
-  }
-  display.clearDisplay();
-  print_line("Alarm is set", 1, 0, 2);
-  print_line("Alarm " + String(alarm+1) +"  "+ String(alarm_hours[alarm]) +":"+ String(alarm_minutes[alarm]), 1, 8, 0);
-  delay(2000);
-  int UTC_Offset = (UTC_OFFSET[0]*60*60) + (UTC_OFFSET[1]*60);
-  configTime(UTC_Offset, UTC_OFFSET_DST, NTP_SERVER);
-}
-
-void remove_alarm(int alarm){
-  alarm_active[alarm-1]=false;
-  
-  display.clearDisplay();
-  print_line(String(alarm) +" is removed", 2, 4, 0);
-  
-}
-
-void run_mode(int mode){
-  if (mode ==0){
-    display.clearDisplay();
-    print_line("Enter alarm you want to remove",1,0,0);
-    print_line("UP-1",1,16,0);
-    print_line("DOWN-2",1,24,0);
-    String pressed2= wait_for_button_press();
-    if (pressed2=="UP"){
-      remove_alarm(1);
-    }
-    else if (pressed2=="DOWN"){
-      remove_alarm(2);
-    }  
-  }
-
-  else if (mode == 1){
-    set_time();
-  }
-  else if (mode ==2){
-    display.clearDisplay();
-    print_line("Enter alarm (1-2)",1,0,0);
-    print_line("UP-1",1,8,0);
-    print_line("DOWN-2",1,16,0);
-    String pressed1= wait_for_button_press();
-    if (pressed1=="UP"){
-      set_alarm(1);
-      alarm_enabled = true;
-    }
-    else if (pressed1=="DOWN"){
-      set_alarm(2);
-      alarm_enabled = true;
-    }
-    
-  }
-  else if (mode == 3){
-    if (alarm_active[0] == true){
-       active_alarm();
-    }
-    else if (alarm_active[1] == true){
-      active_alarm();
-    }
-    else{
-      display.clearDisplay();
-      print_line("No alarms are active",1,0,0);
-    }
-  }
-}
-
-void go_to_menu(){
-  while (digitalRead(CANCEL)==0){
-    display.clearDisplay();
-    for (int i=0; i<5;i++){
-      print_line("1-set time",1,0,0);
-      print_line("2-set alarm",1,8,0);
-      print_line("3-View Active Alarm",1,16,0);
-      print_line("4-remove alarm",1,24,0);
-      delay(200);
-    }
-    if (alarm_enabled == true){
-      delay(500);
-    }
-    String pressed= wait_for_button_press();
-    display.clearDisplay();
-    while(pressed != "OK" & (pressed == "UP" | pressed == "DOWN")){
-      if (pressed=="UP"){
-        current_mode +=1;
-        current_mode %= max_modes;
-      }
-      else if (pressed == "DOWN"){
-        current_mode -= 1;
-        if (current_mode < 0){
-          current_mode = max_modes -1;
-        }
-        
-      }
-      if ( current_mode == 0){
-        display.clearDisplay();
-        print_line(String(String(options[3])) ,1,0,0);
-        delay(200);
-      }
-      else{
-        display.clearDisplay();
-        print_line(String(options[current_mode-1]) ,1,0,0);
-        delay(200);
-      }
-      display.clearDisplay();
-      pressed = wait_for_button_press();
-      delay(200);
-    }
-    Serial.println(current_mode);
-    delay(200);
-    run_mode(current_mode);
-    
-  }
-}
-
-void check_temp(void){
+void check_temp_and_humidity() {
   TempAndHumidity data = dhtSensor.getTempAndHumidity();
-  bool all_good = true;
-  temp= data.temperature;
-  if (data.temperature > 32){
-    all_good = false;
-    digitalWrite(LED_2, HIGH);
-    print_line("TEMP HIGH", 1, 40, 0);
-  }
-  else if(data.temperature < 24){
-    all_good = false;
-    digitalWrite(LED_2,HIGH);
-    print_line("TEMP LOW", 1, 40, 0);
-  }
-  if(data.humidity > 80){
-    all_good = false;
-    digitalWrite(LED_2,HIGH);
-    print_line("HUMD HIGH", 1, 50, 0);
-  }
-  else if(data.humidity < 65){
-    all_good = false;
-    digitalWrite(LED_2,HIGH);
-    print_line("HUMP LOW", 1, 50, 0);
-  }
-  if (all_good){
-    digitalWrite(LED_2, LOW);
+  String warning_message_temp = "";
+  String warning_message_hum = "";
+  temp=data.temperature;
+  show_warning(data.temperature, TEMPURATURE_LOW, TEMPURATURE_HIGH, "TEMPERATURE ", warning_message_temp);
+  show_warning(data.humidity, HUMIDITY_LOW, HUMIDITY_HIGH, "HUMIDITY ", warning_message_hum);
+  if (warning_message_temp.length() > 0 || warning_message_hum.length() > 0) {
+    String lines[2];
+    int columns[2];
+    int rows[2] = {20, 40};
+    if (warning_message_temp.length() > 0) {
+      lines[0] = warning_message_temp;
+      columns[0] = (128 - warning_message_temp.length() * 6) / 2;
+    } else {
+      lines[0] = "";
+      columns[0] = 0;
+    }
+    if (warning_message_hum.length() > 0) {
+      lines[1] = warning_message_hum;
+      columns[1] = (128 - warning_message_hum.length() * 6) / 2;
+    } else {
+      lines[1] = "";
+      columns[1] = 0;
+    }
+    print_lines(lines, 2, 1, columns, rows, true);
+    digitalWrite(LED_RED_PIN, HIGH);
+    //tone(BUZZER, notes[0]);
+    //delay(5000);
+    //noTone(BUZZER);
+    digitalWrite(LED_RED_PIN, LOW);
   }
 }
 
-void connectToBroker(){
-  while(!mqttClient.connected()){
-    Serial.println("Attempting mqtt");
-    display.clearDisplay();
-    print_line("Attempting mqtt",2,0,0);
-    delay(3000);
-    if(mqttClient.connect("ESP32-463517108394")){
-      Serial.println("mqtt connected");
-      print_line("Connected to mqtt",2,0,0);
-      delay(3000);
-      display.clearDisplay();
-      print_line("Connecting to subscribe",2,0,0);
-      mqttClient.subscribe("sampling_interval");
-      mqttClient.subscribe("sending_interval");
-      mqttClient.subscribe("MINIMUM-SERVO-ANGLE");
+void update_time_with_check_alarm_and_check_warning() {
+  print_time_now();
+  if (alarm1_enabled || alarm2_enabled) {
+    for (int i = 0; i < num_alarms; i++) {
+      if (!alarm_triggered[i] && alarm_hours[i] == hours && alarm_minutes[i] == minutes) {
+        //ring_alarm();
+        alarm_triggered[i] = true;
+      }
     }
-    else{
+  }
+  check_temp_and_humidity();
+}
+
+int wait_for_button_press() {
+  int buttons[] = {PB_UP, PB_DOWN, PB_OK, PB_BACK};
+  int numButtons = sizeof(buttons) / sizeof(buttons[0]);
+  while (true) {
+    for (int i = 0; i < numButtons; i++) {
+      if (digitalRead(buttons[i]) == LOW) {
+        delay(200);
+        return buttons[i];
+      }
+    }
+  }
+}
+
+void set_time_unit(int &unit, int max_value, String message) {
+  int temp_unit = unit % max_value;
+  while (true) {
+    print_line(message + String(temp_unit), "y", 1, 5, 30);
+    int pressed = wait_for_button_press();
+    delay(200);
+    switch (pressed) {
+      case PB_UP:
+        temp_unit = (temp_unit + 1) % max_value;
+        break;
+      case PB_DOWN:
+        temp_unit = (temp_unit - 1 + max_value) % max_value;
+        break;
+      case PB_OK:
+        unit = temp_unit;
+        return;
+      case PB_BACK:
+        return;
+    }
+  }
+}
+
+void set_alarm(int alarm) {
+  int temp_alarm_hours = 0;
+  int temp_alarm_minutes = 0;
+  set_time_unit(temp_alarm_hours, 24, "Enter hour: ");
+  set_time_unit(temp_alarm_minutes, 60, "Enter minute: ");
+  alarm_hours[alarm] = temp_alarm_hours;
+  alarm_minutes[alarm] = temp_alarm_minutes;
+  countdown_hours[alarm] = temp_alarm_hours;
+  countdown_minutes[alarm] = temp_alarm_minutes;
+  countdown_seconds[alarm] = 0;
+  is_countdown_active[alarm] = true;
+  print_line("Alarm is set", "y", 1, 5, 30);
+  delay(1000);
+}
+
+void set_alarm1() {
+  set_alarm(0);
+  alarm1_enabled = true;
+}
+
+void set_alarm2() {
+  set_alarm(1);
+  alarm2_enabled = true;
+}
+
+void snooze_alarm(int alarm_index) {
+  if (alarm_index < 0 || alarm_index >= num_alarms) return;
+  countdown_minutes[alarm_index] += 5;
+  if (countdown_minutes[alarm_index] >= 60) {
+    countdown_hours[alarm_index]++;
+    countdown_minutes[alarm_index] -= 60;
+  }
+  display.clearDisplay();
+  print_line("Alarm " + String(alarm_index + 1), "n", 1, 40, 20);
+  print_line("Snoozed +5m", "n", 1, 30, 40);
+  display.display();
+  delay(1000);
+}
+
+void handle_snooze() {
+  if (alarm1_enabled && alarm2_enabled) {
+    bool selection_made = false;
+    unsigned long selection_start = millis();
+    const unsigned long timeout = 5000;
+    while (!selection_made && (millis() - selection_start < timeout)) {
+      String lines[] = {"Snooze Alarm 1", "Snooze Alarm 2"};
+      int columns[] = {5, 5};
+      int rows[] = {20, 40};
+      bool highlight[] = {digitalRead(PB_UP) == LOW, digitalRead(PB_DOWN) == LOW};
       display.clearDisplay();
-      print_line("failed mqtt",2,0,0);
-      Serial.print("Failed");
-      Serial.print(mqttClient.state());
+      for (int i = 0; i < 2; i++) {
+        display.setCursor(columns[i], rows[i]);
+        if (highlight[i]) {
+          display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+          display.println(">" + lines[i]);
+        } else {
+          display.setTextColor(SSD1306_WHITE);
+          display.println(" " + lines[i]);
+        }
+      }
+      display.display();
+      if (digitalRead(PB_UP) == LOW) {
+        snooze_alarm(0);
+        selection_made = true;
+        delay(200);
+      } else if (digitalRead(PB_DOWN) == LOW) {
+        snooze_alarm(1);
+        selection_made = true;
+        delay(200);
+      } else if (digitalRead(PB_BACK) == LOW) {
+        selection_made = true;
+        delay(200);
+      }
+    }
+    display.clearDisplay();
+  } else {
+    if (alarm1_enabled) snooze_alarm(0);
+    if (alarm2_enabled) snooze_alarm(1);
+  }
+}
+
+void disable_alarm(int mode) {
+  display.clearDisplay();
+  if (mode == 1 && alarm1_enabled) {
+    print_line("Disable alarm 1 ?", "n", 1, 5, 30);
+    int pressed = wait_for_button_press();
+    if (pressed == PB_OK) {
+      alarm1_enabled = false;
+      is_countdown_active[0] = false;
+      print_line("Alarm 1 disabled", "y", 1, 5, 30);
+      delay(1000);
+      return;
+    }
+  }
+  if (mode == 2 && alarm2_enabled) {
+    print_line("Disable alarm 2 ?", "n", 1, 5, 30);
+    int pressed = wait_for_button_press();
+    if (pressed == PB_OK) {
+      alarm2_enabled = false;
+      is_countdown_active[1] = false;
+      print_line("Alarm 2 disabled", "y", 1, 5, 30);
+      delay(1000);
+      return;
+    }
+  }
+}
+
+void set_time_zone() {
+  int index = 8;
+  int index_max = num_utc_offsets;
+  while (true) {
+    print_line("Enter UTC offset", "y", 1, 13, 30);
+    print_line(utc_offsets[index], "n", 1, 40, 45);
+    int pressed = wait_for_button_press();
+    delay(200);
+    if (pressed == PB_UP)
+      index = (index + 1) % index_max;
+    else if (pressed == PB_DOWN)
+      index = (index - 1 + index_max) % index_max;
+    else if (pressed == PB_OK) {
+      UTC_OFFSET = utc_offsets[index];
+      configTzTime(UTC_OFFSET.c_str(), NTP_SERVER);
+      print_line("Time zone is set", "y", 1, 10, 30);
+      delay(1000);
+      break;
+    } else if (pressed == PB_BACK)
+      break;
+  }
+}
+
+void run_mode(int mode) {
+  switch(mode) {
+    case 0:
+      set_time_zone();
+      break;
+    case 1:
+      set_alarm1();
+      break;
+    case 2:
+      set_alarm2();
+      break;
+    case 3:
+      disable_alarm(1);
+      disable_alarm(2);
+      break;
+  }
+}
+
+void go_to_menu() {
+  while(digitalRead(PB_BACK) == HIGH) {
+    print_line(modes[current_mode], "y", 1, 5, 30);
+    int pressed = wait_for_button_press();
+    delay(200);
+    switch(pressed) {
+      case PB_UP:
+        current_mode = (current_mode + 1) % max_mode;
+        break;
+      case PB_DOWN:
+        current_mode = (current_mode - 1 + max_mode) % max_mode;
+        break;
+      case PB_OK:
+        run_mode(current_mode);
+        break;
+      case PB_BACK:
+        return;
+    }
+  }
+}
+
+void receiveCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+
+  char payloadBuffer[length + 1]; 
+  for (int i = 0; i < length; i++) {
+    payloadBuffer[i] = (char)payload[i];
+    Serial.print((char)payload[i]);
+  }
+  payloadBuffer[length] = '\0';
+  Serial.println();
+
+  if (strcmp(topic, "SAMPLING-INTERVAL") == 0) {
+    SamplingInterval = atof(payloadBuffer);
+  }
+  else if (strcmp(topic, "SENDING-INTERVAL") == 0) {
+    SendingInterval = atof(payloadBuffer);
+  }
+  else if (strcmp(topic, "SERVO-ANGLE") == 0) {
+    ServoAngle = atof(payloadBuffer);
+  }
+}
+
+void connectToBroker() {
+  while (!mqttClient.connected()) {
+    Serial.println("Attempting to connect to MQTT broker");
+    display.clearDisplay();
+    print_line("Attempting MQTT","n",2,0,0);
+    delay(3000);
+
+    if (mqttClient.connect("ESP32-463517108394")) {
+      Serial.println("MQTT connected.");
+      print_line("Connected to MQTT","n",2,0,0);
+      delay(3000);
+
+      display.clearDisplay();
+      print_line("Subscribing to topics...","n", 2, 0, 0);
+
+      mqttClient.subscribe("SAMPLING-INTERVAL");
+      mqttClient.subscribe("SENDING-INTERVAL");
+      mqttClient.subscribe("SERVO-ANGLE");
+    } 
+    else {
+      display.clearDisplay();
+      print_line("MQTT connection failed","n", 2, 0, 0);
+      Serial.print("Connection failed, state: ");
+      Serial.println(mqttClient.state());
       delay(5000);
     }
   }
 }
 
-void receiveCallback(char* topic, byte* payload, unsigned int length){
-  Serial.print("Message arrived [");
-  Serial.print(topic);
-  Serial.print("] ");
-
-  char payloadCharAr[length];
-  for(int i=0 ; i <length; i++){
-    Serial.println((char)payload[i]);
-    payloadCharAr[i]=(char)payload[i];
-    Serial.print("Message arrived [");
-  }
-  Serial.println();
-  if(strcmp(topic,"sampling_interval")==0){
-     SamplingInterval = atof(payloadCharAr);
-  }
-  else if(strcmp(topic,"sending_interval")==0){
-    SendingInterval = atof(payloadCharAr);
-  }  
-  else if (strcmp(topic, "MINIMUM-SERVO-ANGLE") == 0) {
-    ServoAngle = atof(payloadCharAr);
-  }
-}
-
 void lightIntensity(){
   float I = analogRead(ldr)*1.00;
+  Serial.println(I);
   light_intensity += 1-(I/4096.00);
+  Serial.print("lt true value ");
+  Serial.println(light_intensity);
   n+=1;
-
 }
 void setup() {
-  // put your setup code here, to run once:
-  Serial.begin(9600);
-  pinMode(LED_1,OUTPUT);
-  pinMode(BUZZER,OUTPUT);
-  pinMode(LED_2,OUTPUT);
-  pinMode(CANCEL ,INPUT);
-  pinMode(UP ,INPUT);
-  pinMode(DOWN ,INPUT);
-  pinMode(OK ,INPUT);
+  pinMode(DHT_PIN, INPUT);
+  pinMode(LED_RED_PIN, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+  pinMode(PB_BACK, INPUT);
+  pinMode(PB_OK, INPUT);
+  pinMode(PB_UP, INPUT);
+  pinMode(PB_DOWN, INPUT);
+  pinMode(PB_SNOOZE, INPUT);
   std::cout << "connected";
-  dhtSensor.setup(DHT, DHTesp::DHT22);
+
+  dhtSensor.setup(DHT_PIN, DHTesp::DHT22);
   servoMotor.setPeriodHertz(50);       // Standard servo PWM frequency
   servoMotor.attach(servoPin, 500, 2400);  // Pin, min/max pulse width in µs
   servoMotor.write(0); 
-  std::cout << "connected";
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDERSS)){
+  Serial.begin(9600);
+  if (!display.begin(SSD1306_SWITCHCAPVCC, screen_address)) {
     Serial.println(F("SSD1306 allocation failed"));
     for (;;);
   }
+  
   display.display();
+  delay(1000);
+  display.clearDisplay();
+
+  WiFi.begin(ssid, password, wifi_channel);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(250);
+    print_line("Connecting to WIFI", "y", 1, 0, 5);
+  }
+  
+  print_line("Connected to WIFI", "y", 1, 0, 20);
+  delay(2000);
+  print_line("Updating Time...", "n", 1, 0, 35);
+  configTzTime("IST-5:30", "pool.ntp.org");
+  
+  while (time(nullptr) < 1510644967) {
+    delay(500);
+  }
+  
+  print_line("Time config updated", "n", 1, 0, 50);
+  delay(1000);
+  display.clearDisplay();
   delay(2000);
 
-  display.clearDisplay();
-  print_line("Welcome to Medibox", 2, 4, 0);
-  delay(3000);
-
-  WiFi.begin("Wokwi-GUEST");
-  while (WiFi.status() != WL_CONNECTED){
-    delay(250);
-    display.clearDisplay();
-    print_line("Connecting to WiFiiii",2,0,0);
-    std::cout<< "connected";
-  }
-
-  display.clearDisplay();
-  print_line("Connected to wifiiiii",2 ,0, 0);
-  
   mqttClient.setServer("test.mosquitto.org", 1883);
 
   mqttClient.setCallback(receiveCallback);
 
   connectToBroker();
   
-  int UTC_Offset=UTC_OFFSET[0];
-  configTime(UTC_Offset, UTC_OFFSET_DST, NTP_SERVER);
-  lightIntensity();
+  print_line("Welcome to Medibox!", "y", 1, 0, 30);
+  delay(2000);
+
   
 }
 
 void loop() {
-  Serial.println("loop");
   if (!mqttClient.connected()){
-    Serial.println("Reconnecting to MQTT");
+    Serial.println("Reconnecting  MQTT");
     connectToBroker();
   }
-  check_temp();
+  check_temp_and_humidity();
   
   mqttClient.loop();
+  mqttClient.publish("TEMPERATURE", String(temp).c_str());
+  Serial.println("sending interval");
+  Serial.println(SendingInterval);
+  Serial.println("no of times");
+  Serial.println(n);
+
+  Serial.println(temp);
+  Serial.println(ServoAngle);
+  Serial.println(light_intensity);
   servoMotor.write(ServoAngle);
   if (SamplingInterval<=(millis()/1000)-sec_sample){
       sec_sample = millis()/1000;
@@ -601,18 +566,36 @@ void loop() {
   if (SendingInterval<=(millis()/1000)-sec_send){
       sec_send = millis()/1000;
       light_intensity /= n;
-      n=0;
+      
       Serial.println("ltintensity");
       Serial.println(light_intensity);
-      mqttClient.publish("TEMP", String(temp).c_str());
-      mqttClient.publish("Light intensity", String(light_intensity).c_str());
-
+      
+      mqttClient.publish("LIGHTit", String(light_intensity).c_str());
+      n=0;
   }
+  
 
-  update_time_with_check_alarm();
-  if (digitalRead(CANCEL) == LOW){
-    delay(1000);
-    Serial.println("Menu");
+  //update_time_with_check_alarm_and_check_warning();
+  update_countdown(0);
+  update_countdown(1);
+  
+  int columns[] = {0, 0, 0};
+  int rows[] = {10, 20, 30};
+  String lines[] = {
+    "Time: " + String(hours) + ":" + (minutes < 10 ? "0" : "") + String(minutes) + ":" + (seconds < 10 ? "0" : "") + String(seconds),
+    "Alarm1: " + String(countdown_hours[0]) + ":" + (countdown_minutes[0] < 10 ? "0" : "") + String(countdown_minutes[0]) + ":" + (countdown_seconds[0] < 10 ? "0" : "") + String(countdown_seconds[0]),
+    "Alarm2: " + String(countdown_hours[1]) + ":" + (countdown_minutes[1] < 10 ? "0" : "") + String(countdown_minutes[1]) + ":" + (countdown_seconds[1] < 10 ? "0" : "") + String(countdown_seconds[1])
+  };
+  print_lines(lines, 3, 1, columns, rows, true);
+  
+  if (digitalRead(PB_OK) == LOW) {
+    //delay(200);
     go_to_menu();
   }
+  else if (digitalRead(PB_SNOOZE) == LOW) {
+    //delay(200);
+    handle_snooze();
+  }
+  
+  delay(100);
 }
